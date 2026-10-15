@@ -97,17 +97,37 @@ def analisar_modbus_payload(payload: bytes):
 
 
 def analisar_modbus_rtu_tcp(payload: bytes):
+    """
+    Modbus RTU encapsulado em TCP (sem MBAP).
+    Conservador: exige FC conhecido, tamanho mínimo por função e
+    rejeita MBAP clássico. Reduz falso-positivo em tráfego IT.
+    """
     if not payload or len(payload) < 4:
         return None
     if len(payload) >= 7 and payload[2:4] == b"\x00\x00":
         length = int.from_bytes(payload[4:6], "big")
-        if length == len(payload) - 6 and length >= 2:
+        if 2 <= length <= len(payload) - 6:
             return None
+    if (
+        payload[:2] == b"MZ"
+        or payload[:5] == b"HTTP/"
+        or payload[:3] in (b"\x16\x03\x01", b"\x16\x03\x03")
+        or payload[:4] in (b"GET ", b"POST")
+    ):
+        return None
     addr, fc = payload[0], payload[1]
     if addr == 0 or addr > 247:
         return None
     fc_n = fc & 0x7F
     if fc_n not in {1, 2, 3, 4, 5, 6, 15, 16, 22, 23, 43}:
+        return None
+    min_len = {
+        1: 6, 2: 6, 3: 6, 4: 6,
+        5: 6, 6: 6,
+        15: 9, 16: 9,
+        22: 8, 23: 11, 43: 5,
+    }.get(fc_n, 4)
+    if len(payload) < min_len:
         return None
     return {
         "Modbus RTU TCP": True,
@@ -119,40 +139,97 @@ def analisar_modbus_rtu_tcp(payload: bytes):
     }
 
 
+NOMES_FUNCAO_S7 = {
+    0x00: "CPU services",
+    0x04: "Read Var",
+    0x05: "Write Var",
+    0x1A: "Request download",
+    0x1B: "Download block",
+    0x1C: "Download ended",
+    0x1D: "Start upload",
+    0x1E: "Upload",
+    0x1F: "End upload",
+    0x28: "PI-Service (PLC Start)",
+    0x29: "PLC Stop",
+    0xF0: "Setup communication",
+}
+
+NOMES_ROSCTR_S7 = {
+    0x01: "Job",
+    0x02: "Ack",
+    0x03: "Ack-Data",
+    0x07: "Userdata",
+}
+
+FUNCOES_S7_TRANSFERENCIA = {0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F}
+FUNCOES_S7_CONTROLE = {0x28, 0x29}
+FUNCOES_S7_ESCRITA = {0x05}
+
+
 def analisar_s7_payload(payload: bytes):
+    """TPKT/COTP + S7comm (0x32) / S7comm-plus (0x72); nomes de função e flags."""
     if not payload or len(payload) < 7 or payload[0] != 0x03:
         return None
-    # TPKT + COTP
-    if len(payload) < 4:
-        return None
     indice = 4
-    if len(payload) > 5 and payload[4] == 0x02:  # COTP length
+    cotp_len = payload[4] if len(payload) > 4 else 0
+    if cotp_len and 4 + 1 + cotp_len <= len(payload):
+        indice = 5 + cotp_len
+    elif len(payload) > 6 and payload[4] == 0x02:
         indice = 7
-    # S7comm classic 0x32
-    if indice < len(payload) and payload[indice] == 0x32:
+    if indice >= len(payload):
+        return {
+            "S7": False,
+            "COTP": True,
+            "Variante": "COTP",
+            "Função": None,
+            "Nome função": "COTP (sem PDU S7)",
+            "Tamanho parâmetro": 0,
+            "Tamanho dados": 0,
+        }
+    if payload[indice] == 0x32:
         rosctr = payload[indice + 1] if len(payload) > indice + 1 else None
-        funcao = None
-        if len(payload) > indice + 10:
-            funcao = payload[indice + 10]
+        param_len = data_len = 0
+        if len(payload) >= indice + 10:
+            param_len = int.from_bytes(payload[indice + 6:indice + 8], "big")
+            data_len = int.from_bytes(payload[indice + 8:indice + 10], "big")
+        funcao = payload[indice + 10] if len(payload) > indice + 10 else None
+        nome = NOMES_FUNCAO_S7.get(funcao, f"Função 0x{funcao:02X}") if funcao is not None else "Mensagem S7comm"
         return {
             "S7": True,
             "Variante": "S7comm",
             "ROSCTR": rosctr,
+            "ROSCTR nome": NOMES_ROSCTR_S7.get(rosctr) if isinstance(rosctr, int) else None,
             "Função": funcao,
-            "Tamanho parâmetro": 0,
-            "Tamanho dados": 0,
+            "Nome função": nome,
+            "Tamanho parâmetro": param_len,
+            "Tamanho dados": data_len,
+            "Controle PLC": funcao in FUNCOES_S7_CONTROLE if funcao is not None else False,
+            "Transferência": funcao in FUNCOES_S7_TRANSFERENCIA if funcao is not None else False,
+            "Escrita": funcao in FUNCOES_S7_ESCRITA if funcao is not None else False,
         }
-    # S7comm-plus often 0x72 after COTP
-    if indice < len(payload) and payload[indice] == 0x72:
+    if payload[indice] == 0x72:
+        op = payload[indice + 1] if len(payload) > indice + 1 else None
         return {
             "S7": True,
             "Variante": "S7comm-plus",
             "ROSCTR": None,
-            "Função": payload[indice + 1] if len(payload) > indice + 1 else None,
+            "Função": op,
+            "Nome função": f"S7comm-plus opcode 0x{op:02X}" if op is not None else "S7comm-plus",
             "Tamanho parâmetro": 0,
             "Tamanho dados": 0,
+            "Controle PLC": False,
+            "Transferência": False,
+            "Escrita": False,
         }
-    return None
+    return {
+        "S7": False,
+        "COTP": True,
+        "Variante": "COTP",
+        "Função": None,
+        "Nome função": "COTP/ISO-TSAP (sem S7comm)",
+        "Tamanho parâmetro": 0,
+        "Tamanho dados": 0,
+    }
 
 
 def analisar_mms_payload(payload: bytes):
@@ -212,14 +289,14 @@ def classificar_protocolo_ot_com_confianca(
             return "Modbus RTU over TCP", CONFIANCA_ALTA
         # fallbacks handled in main module for enip/opc/dnp3 etc.
 
+    # Portas ambíguas NÃO são aceitas só por número — exigem assinatura.
     for porta in portas:
         if porta is None:
             continue
         if porta in PORTAS_CLASSICAS:
             return PORTAS_OT.get(porta), CONFIANCA_MEDIA
-        if porta in PORTAS_AMBIGUAS and porta in PORTAS_OT:
-            return PORTAS_OT.get(porta), CONFIANCA_BAIXA
-        if porta in PORTAS_OT:
-            return PORTAS_OT[porta], CONFIANCA_MEDIA
+        if porta in (4843, 8883) and porta in PORTAS_OT:
+            return PORTAS_OT.get(porta), CONFIANCA_MEDIA
+        # Demais portas: sem assinatura → não classificar como OT
 
     return None, None

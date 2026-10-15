@@ -2,7 +2,8 @@
 """
 iniciar.py — sobe o Analisador OT de PCAP em ambiente local (.venv).
 
-Valida cada biblioteca; instala apenas as que faltarem (ou todas se o venv for novo).
+- 100% offline na análise de PCAP (nenhum PCAP é enviado à internet).
+- Valida Streamlit e demais bibliotecas; instala apenas o que faltar.
 """
 import os
 import socket
@@ -30,6 +31,7 @@ PORTA = 8502
 URL_APLICACAO = f"http://{ENDERECO}:{PORTA}"
 
 # nome_pip -> módulo Python para import
+# Streamlit é obrigatório e verificado primeiro.
 PACOTES = {
     "streamlit": "streamlit",
     "scapy": "scapy",
@@ -118,8 +120,8 @@ def instalar_pacotes(lista_pip):
         return
     log("")
     log("Instalando pacotes ausentes: " + ", ".join(lista_pip))
+    log("(É necessária conexão com a internet apenas nesta etapa de instalação.)")
 
-    # Atualiza pip (best effort)
     executar(
         [
             str(PYTHON_VENV),
@@ -150,12 +152,48 @@ def instalar_pacotes(lista_pip):
     log("Instalação concluída.")
 
 
+def garantir_streamlit():
+    """
+    Verifica explicitamente se o Streamlit está instalado no .venv.
+    Se não estiver, instala antes das demais bibliotecas.
+    """
+    log("")
+    log("Verificando Streamlit (obrigatório para a interface web)...")
+    if pacote_instalado("streamlit"):
+        r = subprocess.run(
+            [
+                str(PYTHON_VENV),
+                "-c",
+                "import streamlit as st; print(getattr(st, '__version__', '?'))",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        versao = (r.stdout or "").strip() or "?"
+        log(f"  [OK] Streamlit já instalado (versão {versao})")
+        return
+
+    log("  [AUSENTE] Streamlit não encontrado — instalando agora...")
+    instalar_pacotes(["streamlit"])
+
+    if not pacote_instalado("streamlit"):
+        raise RuntimeError(
+            "Falha ao instalar o Streamlit.\n"
+            "Verifique a conexão com a internet e tente novamente:\n"
+            f"  {PYTHON_VENV} -m pip install streamlit"
+        )
+    log("  [OK] Streamlit instalado com sucesso.")
+
+
 def garantir_bibliotecas():
     """
-    Valida cada biblioteca. Instala só as que faltam.
-    Se após instalar ainda faltar alguma, tenta de novo uma vez e falha com erro claro.
+    1) Garante Streamlit.
+    2) Valida as demais bibliotecas e instala só as que faltam.
     """
+    garantir_streamlit()
+
     faltando = listar_pacotes_faltando()
+    faltando = [p for p in faltando if p != "streamlit"]
     if not faltando:
         log("")
         log("Todas as bibliotecas necessárias já estão instaladas.")
@@ -165,14 +203,13 @@ def garantir_bibliotecas():
     log(f"{len(faltando)} biblioteca(s) ausente(s). Iniciando instalação...")
     instalar_pacotes(faltando)
 
-    # Revalida
     ainda = listar_pacotes_faltando()
+    ainda = [p for p in ainda if p != "streamlit"]
     if ainda:
-        # segunda tentativa (rede/cache)
         log("")
         log("Ainda faltam pacotes — nova tentativa de instalação...")
         instalar_pacotes(ainda)
-        ainda = listar_pacotes_faltando()
+        ainda = [p for p in listar_pacotes_faltando() if p != "streamlit"]
         if ainda:
             raise RuntimeError(
                 "Não foi possível instalar: " + ", ".join(ainda) + "\n"
@@ -185,11 +222,17 @@ def garantir_bibliotecas():
 
 def main():
     log("=" * 60)
-    log("ANALISADOR LOCAL DE PCAP")
+    log("ANALISADOR LOCAL DE PCAP (modo offline)")
     log("=" * 60)
     log(f"Pasta do projeto: {PASTA_PROJETO}")
     log(f"Aplicação:        {ARQUIVO_APP.name}")
     log(f"Python do venv:   {PYTHON_VENV}")
+    log("")
+    log("Modo de operação:")
+    log("  • Análise de PCAP: 100% local (offline)")
+    log("  • Nenhum arquivo PCAP é enviado à internet")
+    log("  • Internet só é usada, se necessário, para instalar pacotes pip")
+    log("  • Consultas externas (ip-api) só ocorrem se você ativar na interface")
 
     if not ARQUIVO_APP.exists():
         log("")

@@ -23,6 +23,11 @@ import streamlit.components.v1 as components
 from pyvis.network import Network
 from scapy.all import ARP, DNS, DNSQR, Ether, ICMP, IP, IPv6, Raw, TCP, UDP
 from scapy.utils import PcapNgReader, PcapReader
+try:
+    from scapy.config import conf as _scapy_conf
+    _scapy_conf.verb = 0  # silencia logs do Scapy (performance + console limpo)
+except Exception:
+    pass
 
 try:
     from protocolos_ot import (
@@ -52,7 +57,67 @@ LIMITE_NOS_MAPA = 60
 LIMITE_ARESTAS_MAPA = 180
 LIMITE_PAYLOAD = 8192
 LIMITE_TRANSFERENCIA_OT = 1024
+
+try:
+    from base_plcs_offline import (
+        BASE_PLCS_VERSAO,
+        info_funcao_s7,
+        info_funcao_modbus,
+        info_umas,
+        fabricante_por_protocolo,
+        protocolo_na_base,
+        porta_permitida_para_protocolo,
+        mensagem_protocolo_fora_da_base,
+        resumo_base,
+        PORTAS_PERMITIDAS_POR_PROTOCOLO,
+        FUNCOES_UMAS as BASE_FUNCOES_UMAS,
+    )
+    _BASE_PLC_OK = True
+except ImportError:
+    BASE_PLCS_VERSAO = "indisponivel"
+    _BASE_PLC_OK = False
+    BASE_FUNCOES_UMAS = {}
+    def info_funcao_s7(c):
+        return {"nome": f"Função S7 0x{c:02X}" if c is not None else "S7", "critico": False, "categoria": "?"}
+    def info_funcao_modbus(c):
+        return {"nome": f"FC {c}", "critico": False, "categoria": "?"}
+    def info_umas(c):
+        return f"UMAS 0x{c:02X}" if c is not None else "UMAS"
+    def fabricante_por_protocolo(n):
+        return None
+    def protocolo_na_base(n):
+        return True
+    def porta_permitida_para_protocolo(n, p):
+        return True
+    def mensagem_protocolo_fora_da_base(n, p=None):
+        return f"Protocolo «{n}» fora da base offline — estenda base_plcs_offline.py."
+    def resumo_base():
+        return {"versao": "indisponivel", "offline": True}
+    PORTAS_PERMITIDAS_POR_PROTOCOLO = {}
+
 LIMITE_EVENTOS_OT = 1000
+
+# ---------------------------------------------------------------------------
+# Aviso oficial — análise preliminar (UI, PDF, HTML e markdown)
+# ---------------------------------------------------------------------------
+AVISO_ANALISE_PRELIMINAR = (
+    "Análise preliminar — validação obrigatória no PCAP"
+)
+AVISO_ANALISE_PRELIMINAR_TEXTO = (
+    "Este relatório é gerado automaticamente por heurísticas offline aplicadas ao(s) "
+    "arquivo(s) PCAP. Indicadores, classificações de protocolo (OT ou IT), alertas, "
+    "IOCs candidatos e hipóteses de comportamento são evidências técnicas derivadas "
+    "da captura e não constituem prova conclusiva de incidente ou de comprometimento. "
+    "Todo achado deve ser validado manualmente no PCAP original (Wireshark, tshark ou "
+    "ferramenta equivalente), no contexto operacional da rede e, quando aplicável, "
+    "com inteligência de ameaças e engenharia de processo. Falsos positivos podem "
+    "ocorrer — em especial quando tráfego IT genérico é interpretado como protocolo "
+    "industrial. Preserve o PCAP original e o hash SHA-256 para cadeia de custódia."
+)
+AVISO_ANALISE_PRELIMINAR_CURTO = (
+    "Análise preliminar baseada em heurísticas. Valide todos os indicadores "
+    "diretamente no PCAP original antes de qualquer ação operacional ou forense."
+)
 
 # Portas/protocolos OT reconhecidos por heurísticas de captura.
 # A identificação não significa, por si só, que o tráfego seja malicioso.
@@ -99,7 +164,9 @@ ETHERTYPES_OT = {
 
 META_PROTOCOLOS_OT = {
     "Siemens S7comm / ISO-TSAP": ("Siemens", "S7 / S7comm"),
+    "Siemens S7comm-plus": ("Siemens", "S7comm-plus"),
     "Modbus TCP": ("Schneider / múltiplos fabricantes", "Modbus TCP"),
+    "Schneider UMAS / Unity Pro": ("Schneider Electric", "UMAS / Unity Pro / Control Expert"),
     "Modbus RTU over TCP": ("Schneider / múltiplos fabricantes", "Modbus RTU encapsulado"),
     "IEC 60870-5-104": ("IEC / múltiplos fabricantes", "IEC-104"),
     "EtherNet/IP / CIP": ("Rockwell / múltiplos fabricantes", "EtherNet/IP / CIP"),
@@ -136,6 +203,45 @@ PORTAS_TRANSFERENCIA_OT = {102, 502, 2404, 44818, 2222, 4840, 4843, 20000, 47808
 
 FUNCOES_MODBUS_ESCRITA = {5, 6, 15, 16, 22, 23}
 FUNCOES_S7_TRANSFERENCIA_CANDIDATA = {0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F}
+FUNCOES_S7_CONTROLE_PLC = {0x28, 0x29}  # PI-Service (start), PLC Stop
+FUNCOES_S7_ESCRITA = {0x05}  # Write Var
+
+# Nomes oficiais / usuais S7comm (Job function codes)
+NOMES_FUNCAO_S7 = {
+    0x00: "CPU services",
+    0x04: "Read Var",
+    0x05: "Write Var",
+    0x1A: "Request download",
+    0x1B: "Download block",
+    0x1C: "Download ended",
+    0x1D: "Start upload",
+    0x1E: "Upload",
+    0x1F: "End upload",
+    0x28: "PI-Service (PLC Start)",
+    0x29: "PLC Stop",
+    0xF0: "Setup communication",
+}
+
+NOMES_ROSCTR_S7 = {
+    0x01: "Job",
+    0x02: "Ack",
+    0x03: "Ack-Data",
+    0x07: "Userdata",
+}
+
+NOMES_FUNCAO_MODBUS = {
+    1: "Read Coils",
+    2: "Read Discrete Inputs",
+    3: "Read Holding Registers",
+    4: "Read Input Registers",
+    5: "Write Single Coil",
+    6: "Write Single Register",
+    15: "Write Multiple Coils",
+    16: "Write Multiple Registers",
+    22: "Mask Write Register",
+    23: "Read/Write Multiple Registers",
+    43: "Read Device Identification",
+}
 
 st.set_page_config(
     page_title="Analisador OT de PCAP",
@@ -1101,28 +1207,52 @@ def analisar_hartip_payload(payload):
 
 def analisar_modbus_rtu_tcp(payload):
     """
-    Modbus RTU encapsulado em TCP (sem MBAP): addr + FC + data + CRC16.
-    Conservador: exige FC Modbus conhecido e descarta MBAP clássico.
+    Modbus RTU encapsulado em TCP (sem MBAP).
+    Muito conservador: rejeita qualquer coisa que pareça MBAP, HTTP, TLS, PE,
+    e só aceita FC padrão (não 0x5A UMAS). Reduz FP em tráfego Unity/UMAS.
     """
     if not payload or len(payload) < 4:
         return None
-    # MBAP clássico: proto ID = 0 e length coerente com o restante
+    # MBAP clássico → não é RTU
     if len(payload) >= 7 and payload[2:4] == b"\x00\x00":
         length = int.from_bytes(payload[4:6], "big")
-        if length == len(payload) - 6 and length >= 2:
+        if 2 <= length <= len(payload) - 6:
             return None
-    addr = payload[0]
-    fc = payload[1]
+    if (
+        payload[:2] == b"MZ"
+        or payload[:5] == b"HTTP/"
+        or payload[:3] in (b"\x16\x03\x01", b"\x16\x03\x03")
+        or payload[:4] in (b"GET ", b"POST")
+        or payload[0] == 0x03  # TPKT/S7
+    ):
+        return None
+    addr, fc = payload[0], payload[1]
     if addr == 0 or addr > 247:
         return None
     fc_n = fc & 0x7F
-    if fc_n not in {1, 2, 3, 4, 5, 6, 15, 16, 22, 23}:
+    # Não interpretar 0x5A como RTU (é UMAS em MBAP)
+    if fc_n not in {1, 2, 3, 4, 5, 6, 15, 16, 22, 23, 43}:
         return None
+    min_len = {
+        1: 6, 2: 6, 3: 6, 4: 6,
+        5: 6, 6: 6,
+        15: 9, 16: 9,
+        22: 8, 23: 11, 43: 5,
+    }.get(fc_n, 8)
+    if len(payload) < min_len:
+        return None
+    # Exige tamanho "parecido" com trama RTU curta (evita binários longos de engenharia)
+    if len(payload) > 260:
+        return None
+    info = info_funcao_modbus(fc_n)
     return {
         "Modbus RTU TCP": True,
         "Slave": addr,
         "Função": fc_n,
-        "Escrita": fc_n in {5, 6, 15, 16, 22, 23},
+        "Nome função": info.get("nome", f"FC {fc_n}"),
+        "Exceção": bool(fc & 0x80),
+        "Escrita": fc_n in FUNCOES_MODBUS_ESCRITA,
+        "Identificação dispositivo": fc_n == 43,
     }
 
 
@@ -1227,66 +1357,87 @@ def classificar_protocolo_ot(
         # EtherType conhecido mesmo sem parse profundo
         return ETHERTYPES_OT.get(ethertype)
 
-    # --- TCP com assinatura ---
+    # --- TCP com assinatura (restrita por porta para evitar FP em payloads binários) ---
     if transporte == "TCP" and payload:
-        if analisar_s7_payload(payload):
+        portas_fluxo = {p for p in (porta_origem, porta_destino) if p is not None}
+
+        # S7 / MMS: só em 102 (ou se payload TPKT 0x03 e porta desconhecida, ainda exige TPKT)
+        if 102 in portas_fluxo or (payload and payload[0:1] == b"\x03"):
             s7 = analisar_s7_payload(payload)
-            if s7 and s7.get("Variante") == "S7comm-plus":
-                return "Siemens S7comm-plus"
-            return "Siemens S7comm / ISO-TSAP"
-        # MMS (IEC 61850) também usa porta 102 / ISO-TSAP
-        try:
-            if _mms_mod and _mms_mod(payload):
-                return "IEC 61850 MMS"
-        except Exception:
-            pass
-        if analisar_modbus_payload(payload):
-            return "Modbus TCP"
-        rtu = analisar_modbus_rtu_tcp(payload)
-        if rtu:
-            return "Modbus RTU over TCP"
-        if analisar_enip_payload(payload):
+            if s7 and s7.get("S7"):
+                if s7.get("Variante") == "S7comm-plus":
+                    return "Siemens S7comm-plus"
+                return "Siemens S7comm / ISO-TSAP"
+            if 102 in portas_fluxo:
+                try:
+                    if _mms_mod and _mms_mod(payload):
+                        return "IEC 61850 MMS"
+                except Exception:
+                    pass
+
+        # Modbus / UMAS: prioriza porta 502; MBAP válido também aceito
+        mb = analisar_modbus_payload(payload)
+        if mb:
+            if mb.get("UMAS"):
+                return "Schneider UMAS / Unity Pro"
+            if 502 in portas_fluxo:
+                return "Modbus TCP"
+        # RTU over TCP: nunca quando já há MBAP/UMAS; evita FP em Unity
+        if not mb and 502 not in portas_fluxo:
+            rtu = analisar_modbus_rtu_tcp(payload)
+            if rtu:
+                return "Modbus RTU over TCP"
+
+        def _porta_ok(nome):
+            return any(porta_permitida_para_protocolo(nome, p) for p in portas_fluxo) if portas_fluxo else False
+
+        if _porta_ok("EtherNet/IP / CIP") and analisar_enip_payload(payload):
             return "EtherNet/IP / CIP"
-        if analisar_opcua_payload(payload):
+        if _porta_ok("OPC UA") and analisar_opcua_payload(payload):
             return "OPC UA"
-        if analisar_iec104_payload(payload):
+        if _porta_ok("IEC 60870-5-104") and analisar_iec104_payload(payload):
             return "IEC 60870-5-104"
-        if analisar_dnp3_payload(payload):
+        if _porta_ok("DNP3") and analisar_dnp3_payload(payload):
             return "DNP3"
-        if analisar_mitsubishi_payload(payload):
+        if _porta_ok("Mitsubishi MC / SLMP") and analisar_mitsubishi_payload(payload):
             return "Mitsubishi MC / SLMP"
-        if analisar_ads_payload(payload):
+        if _porta_ok("Beckhoff ADS") and analisar_ads_payload(payload):
             return "Beckhoff ADS"
-        if analisar_mqtt_payload(payload):
+        if _porta_ok("MQTT") and analisar_mqtt_payload(payload):
             return "MQTT"
-        if analisar_hartip_payload(payload):
+        if _porta_ok("HART-IP") and analisar_hartip_payload(payload):
             return "HART-IP"
-        if analisar_codesys_payload(payload):
+        if _porta_ok("CODESYS") and analisar_codesys_payload(payload):
             return "CODESYS"
-        if analisar_c37118_payload(payload):
+        if _porta_ok("IEEE C37.118") and analisar_c37118_payload(payload):
             return "IEEE C37.118"
 
-    # --- UDP com assinatura ---
+    # --- UDP com assinatura (também restrita por porta) ---
     if transporte == "UDP" and payload:
-        if analisar_fins_payload(payload):
+        portas_fluxo = {p for p in (porta_origem, porta_destino) if p is not None}
+
+        def _porta_ok_u(nome):
+            return any(porta_permitida_para_protocolo(nome, p) for p in portas_fluxo) if portas_fluxo else False
+
+        if _porta_ok_u("Omron FINS") and analisar_fins_payload(payload):
             return "Omron FINS"
-        if analisar_dnp3_payload(payload):
+        if _porta_ok_u("DNP3") and analisar_dnp3_payload(payload):
             return "DNP3"
-        if analisar_bacnet_payload(payload):
+        if _porta_ok_u("BACnet/IP") and analisar_bacnet_payload(payload):
             return "BACnet/IP"
-        if analisar_enip_payload(payload):
+        if _porta_ok_u("EtherNet/IP / CIP") and analisar_enip_payload(payload):
             return "EtherNet/IP / CIP"
         if analisar_ethercat_payload(payload):
             return "EtherCAT (UDP)"
         if analisar_profinet_payload(payload):
             return "PROFINET (UDP RPC)"
-        if analisar_knx_payload(payload):
+        if _porta_ok_u("KNXnet/IP") and analisar_knx_payload(payload):
             return "KNXnet/IP"
-        if analisar_hartip_payload(payload):
+        if _porta_ok_u("HART-IP") and analisar_hartip_payload(payload):
             return "HART-IP"
-        if analisar_c37118_payload(payload):
+        if _porta_ok_u("IEEE C37.118") and analisar_c37118_payload(payload):
             return "IEEE C37.118"
-        if analisar_mqtt_payload(payload):
+        if _porta_ok_u("MQTT") and analisar_mqtt_payload(payload):
             return "MQTT"
 
     # --- Porta + evidência mínima (não rotular só por porta) ---
@@ -1357,43 +1508,117 @@ def direcao_cliente_servidor(
 
 
 def analisar_s7_payload(payload):
-    """TPKT/COTP + S7comm (0x32) ou S7comm-plus (0x72)."""
+    """
+    TPKT/COTP + S7comm (0x32) ou S7comm-plus (0x72).
+    Extrai ROSCTR, comprimentos e código de função Job (quando presente).
+    Pacotes só COTP (sem PDU S7) retornam COTP=True sem função.
+    """
     if not payload or len(payload) < 7 or payload[0] != 0x03:
         return None
+
+    # TPKT length (bytes 2-3)
+    tpkt_len = int.from_bytes(payload[2:4], "big") if len(payload) >= 4 else 0
+
+    # COTP: byte 4 = length of COTP header following this byte
     indice = 4
-    # pula COTP
-    if len(payload) > 5:
-        cotp_len = payload[4]
-        if cotp_len and 4 + 1 + cotp_len <= len(payload):
-            indice = 5 + cotp_len
+    cotp_len = payload[4] if len(payload) > 4 else 0
+    if cotp_len and 4 + 1 + cotp_len <= len(payload):
+        indice = 5 + cotp_len
+    else:
+        # fallback comum: DT COTP 02 F0 80 → índice 7
+        if len(payload) > 6 and payload[4] == 0x02:
+            indice = 7
+
     if indice >= len(payload):
-        return None
+        return {
+            "S7": False,
+            "COTP": True,
+            "Variante": "COTP",
+            "ROSCTR": None,
+            "Função": None,
+            "Nome função": "COTP (sem PDU S7)",
+            "Tamanho parâmetro": 0,
+            "Tamanho dados": 0,
+            "Critico": False,
+            "Controle PLC": False,
+            "Transferência": False,
+            "Escrita": False,
+        }
+
+    # S7comm classic
     if payload[indice] == 0x32:
         rosctr = payload[indice + 1] if len(payload) > indice + 1 else None
+        param_len = 0
+        data_len = 0
+        if len(payload) >= indice + 10:
+            param_len = int.from_bytes(payload[indice + 6:indice + 8], "big")
+            data_len = int.from_bytes(payload[indice + 8:indice + 10], "big")
         funcao = payload[indice + 10] if len(payload) > indice + 10 else None
+        # Em Ack-Data (0x03) o layout pode diferir; função só é confiável em Job (0x01)
+        nome = None
+        if funcao is not None:
+            nome = NOMES_FUNCAO_S7.get(funcao, f"Função 0x{funcao:02X}")
+        ros_nome = NOMES_ROSCTR_S7.get(rosctr, f"0x{rosctr:02X}") if isinstance(rosctr, int) else None
+        transferencia = funcao in FUNCOES_S7_TRANSFERENCIA_CANDIDATA if funcao is not None else False
+        controle = funcao in FUNCOES_S7_CONTROLE_PLC if funcao is not None else False
+        escrita = funcao in FUNCOES_S7_ESCRITA if funcao is not None else False
         return {
             "S7": True,
+            "COTP": True,
             "Variante": "S7comm",
             "ROSCTR": rosctr,
+            "ROSCTR nome": ros_nome,
             "Função": funcao,
-            "Tamanho parâmetro": 0,
-            "Tamanho dados": 0,
+            "Nome função": nome or "Mensagem S7comm",
+            "Tamanho parâmetro": param_len,
+            "Tamanho dados": data_len,
+            "TPKT length": tpkt_len,
+            "Critico": bool(controle or transferencia or escrita),
+            "Controle PLC": controle,
+            "Transferência": transferencia,
+            "Escrita": escrita,
         }
+
+    # S7comm-plus
     if payload[indice] == 0x72:
+        opcode = payload[indice + 1] if len(payload) > indice + 1 else None
         return {
             "S7": True,
+            "COTP": True,
             "Variante": "S7comm-plus",
             "ROSCTR": None,
-            "Função": payload[indice + 1] if len(payload) > indice + 1 else None,
+            "ROSCTR nome": None,
+            "Função": opcode,
+            "Nome função": f"S7comm-plus opcode 0x{opcode:02X}" if opcode is not None else "S7comm-plus",
             "Tamanho parâmetro": 0,
             "Tamanho dados": 0,
+            "TPKT length": tpkt_len,
+            "Critico": False,
+            "Controle PLC": False,
+            "Transferência": False,
+            "Escrita": False,
         }
-    return None
+
+    # ISO-TSAP / COTP sem S7 reconhecido (possível MMS ou COTP puro)
+    return {
+        "S7": False,
+        "COTP": True,
+        "Variante": "COTP",
+        "ROSCTR": None,
+        "Função": None,
+        "Nome função": "COTP/ISO-TSAP (sem S7comm)",
+        "Tamanho parâmetro": 0,
+        "Tamanho dados": 0,
+        "Critico": False,
+        "Controle PLC": False,
+        "Transferência": False,
+        "Escrita": False,
+    }
 
 
 
 def analisar_modbus_payload(payload):
-    """Identificação heurística de Modbus TCP (inclui exceções e FC 43)."""
+    """Modbus TCP (MBAP) + detecção Schneider UMAS (FC 0x5A)."""
     if not payload or len(payload) < 8:
         return None
     if payload[2:4] != b"\x00\x00":
@@ -1401,19 +1626,50 @@ def analisar_modbus_payload(payload):
     length = int.from_bytes(payload[4:6], "big")
     if length < 2 or length > len(payload) - 6:
         return None
+    unit = payload[6]
     fc = payload[7]
     fc_n = fc & 0x7F
     excecao = bool(fc & 0x80)
+
+    # Schneider UMAS: FC 90 (0x5A) sobre Modbus TCP
+    if fc_n == 0x5A and not excecao:
+        session = payload[8] if len(payload) > 8 else None
+        umas_fn = payload[9] if len(payload) > 9 else None
+        umas_nome = info_umas(umas_fn) if umas_fn is not None else "UMAS"
+        return {
+            "Modbus": True,
+            "UMAS": True,
+            "Função": 0x5A,
+            "Nome função": f"UMAS / {umas_nome}",
+            "UMAS função": umas_fn,
+            "UMAS session": session,
+            "Exceção": False,
+            "Código exceção": None,
+            "Escrita": True,  # programação/upload — tratar como alteração candidata
+            "Identificação dispositivo": False,
+            "Unit": unit,
+            "Tamanho": length,
+            "Protocolo": "Schneider UMAS / Unity Pro",
+            "Fabricante": "Schneider Electric",
+            "Critico": True,
+        }
+
+    info = info_funcao_modbus(fc_n)
+    escrita = fc_n in FUNCOES_MODBUS_ESCRITA
     return {
         "Modbus": True,
+        "UMAS": False,
         "Função": fc_n,
+        "Nome função": info.get("nome", f"FC {fc_n}"),
         "Exceção": excecao,
         "Código exceção": payload[8] if excecao and len(payload) > 8 else None,
-        "Escrita": (not excecao) and fc_n in {5, 6, 15, 16, 22, 23},
+        "Escrita": escrita and not excecao,
         "Identificação dispositivo": fc_n == 43,
+        "Unit": unit,
         "Tamanho": length,
+        "Protocolo": "Modbus TCP",
+        "Critico": bool(info.get("critico")) and not excecao,
     }
-
 
 
 def analisar_enip_payload(payload):
@@ -1869,23 +2125,53 @@ def detectar_ot_pacote(
     if protocolo_ot == "Siemens S7comm / ISO-TSAP":
         s7 = analisar_s7_payload(payload)
         if s7:
-            funcao = s7["Função"]
-            operacao = f"Função S7 0x{funcao:02X}" if funcao is not None else "Mensagem S7comm"
-            ros = s7.get("ROSCTR")
-            ros_txt = f"0x{ros:02X}" if isinstance(ros, int) else "-"
-            detalhe = (
-                f"TPKT/COTP/S7comm; ROSCTR={ros_txt}; "
-                f"função={operacao}; parâmetro={s7['Tamanho parâmetro']} B; "
-                f"dados={s7['Tamanho dados']} B."
+            funcao = s7.get("Função")
+            nome_f = s7.get("Nome função") or (
+                f"Função S7 0x{funcao:02X}" if funcao is not None else "Mensagem S7comm"
             )
-            if funcao in FUNCOES_S7_TRANSFERENCIA_CANDIDATA:
+            operacao = nome_f
+            ros = s7.get("ROSCTR")
+            ros_nome = s7.get("ROSCTR nome")
+            ros_txt = ros_nome or (f"0x{ros:02X}" if isinstance(ros, int) else "-")
+            detalhe = (
+                f"TPKT/COTP/{s7.get('Variante', 'S7')}; ROSCTR={ros_txt}; "
+                f"função={nome_f}"
+                + (f" (0x{funcao:02X})" if funcao is not None else "")
+                + f"; parâmetro={s7.get('Tamanho parâmetro', 0)} B; "
+                f"dados={s7.get('Tamanho dados', 0)} B."
+            )
+            if s7.get("Controle PLC"):
+                if funcao == 0x29:
+                    categoria = "Alteração OT candidata"
+                    classificacao = "PLC Stop (S7 0x29) — parada de CPU"
+                else:
+                    categoria = "Alteração OT candidata"
+                    classificacao = "PI-Service / PLC Start (S7 0x28)"
+            elif s7.get("Transferência"):
                 categoria = "Transferência OT candidata"
-                classificacao = "Transferência de bloco S7 candidata"
+                if funcao in (0x1D, 0x1E, 0x1F):
+                    classificacao = f"Upload de bloco S7 ({nome_f})"
+                else:
+                    classificacao = f"Download de bloco S7 ({nome_f})"
+            elif s7.get("Escrita"):
+                categoria = "Alteração OT candidata"
+                classificacao = "Write Var S7 (escrita de variável)"
+            elif funcao == 0x04:
+                categoria = "Leitura OT"
+                classificacao = "Read Var S7"
+            elif funcao == 0xF0:
+                categoria = "Sessão OT"
+                classificacao = "Setup communication S7"
+            elif not s7.get("S7"):
+                operacao = s7.get("Nome função") or "COTP"
+                detalhe = "Frame ISO-TSAP/COTP sem PDU S7comm."
+                categoria = "Sessão OT"
+                classificacao = "COTP/ISO-TSAP"
 
     elif protocolo_ot == "Siemens S7comm-plus":
         s7 = analisar_s7_payload(payload)
-        operacao = "S7comm-plus"
-        detalhe = f"Variante S7comm-plus (0x72); função={s7.get('Função') if s7 else '-'}."
+        operacao = (s7 or {}).get("Nome função") or "S7comm-plus"
+        detalhe = f"Variante S7comm-plus (0x72); {operacao}."
         categoria = "Comunicação OT"
         classificacao = "S7comm-plus"
 
@@ -1895,9 +2181,21 @@ def detectar_ot_pacote(
         categoria = "Comunicação OT"
         classificacao = "IEC 61850 MMS"
 
-    elif protocolo_ot == "Modbus TCP":
+    elif protocolo_ot in ("Modbus TCP", "Schneider UMAS / Unity Pro"):
         mb = analisar_modbus_payload(payload)
-        if mb:
+        if mb and mb.get("UMAS"):
+            umas_fn = mb.get("UMAS função")
+            operacao = mb.get("Nome função") or "UMAS"
+            detalhe = (
+                f"Schneider UMAS (Modbus FC 0x5A) sobre TCP/502; "
+                f"subfunção={info_umas(umas_fn)}; session={mb.get('UMAS session')}; "
+                f"PDU={mb.get('Tamanho')} B. Programação/upload Unity Pro ou Control Expert."
+            )
+            categoria = "Transferência OT candidata"
+            classificacao = "Schneider UMAS — programação/engenharia PLC"
+            fabricante = "Schneider Electric"
+            familia = "Modicon / Unity Pro"
+        elif mb:
             if mb.get("Exceção"):
                 operacao = f"Exceção Modbus FC {mb['Função']}"
                 detalhe = f"MBAP; exceção FC={mb['Função']}; código={mb.get('Código exceção')}."
@@ -1908,12 +2206,17 @@ def detectar_ot_pacote(
                 detalhe = "Leitura de identificação do dispositivo (FC 43)."
                 classificacao = "Inventário Modbus"
             else:
-                operacao = f"Função Modbus {mb['Função']}"
-                detalhe = f"MBAP válido; função={mb['Função']}; PDU={mb['Tamanho']} B."
+                fc = mb["Função"]
+                nome_mb = mb.get("Nome função") or NOMES_FUNCAO_MODBUS.get(fc, f"FC {fc}")
+                operacao = f"Modbus {nome_mb}"
+                detalhe = f"MBAP válido; {nome_mb} (FC {fc}); PDU={mb['Tamanho']} B."
                 if mb["Escrita"]:
                     categoria = "Alteração OT candidata"
-                    classificacao = "Escrita Modbus observada"
+                    classificacao = f"Escrita Modbus ({nome_mb})"
                     detalhe += " A operação de escrita deve ser validada no contexto operacional."
+                elif fc in (1, 2, 3, 4):
+                    categoria = "Leitura OT"
+                    classificacao = f"Leitura Modbus ({nome_mb})"
 
     elif protocolo_ot == "EtherNet/IP / CIP":
         enip = analisar_enip_payload(payload)
@@ -2101,11 +2404,16 @@ def detectar_ot_pacote(
     elif protocolo_ot == "Modbus RTU over TCP":
         rtu = analisar_modbus_rtu_tcp(payload)
         if rtu:
-            operacao = f"Modbus RTU FC {rtu.get('Função')}"
-            detalhe = f"slave={rtu.get('Slave')}; FC={rtu.get('Função')} (RTU encapsulado)."
+            fc = rtu.get("Função")
+            nome_mb = NOMES_FUNCAO_MODBUS.get(fc, f"FC {fc}")
+            operacao = f"Modbus RTU {nome_mb}"
+            detalhe = f"slave={rtu.get('Slave')}; {nome_mb} (FC {fc}, RTU encapsulado)."
             if rtu.get("Escrita"):
                 categoria = "Alteração OT candidata"
-                classificacao = "Escrita Modbus RTU over TCP"
+                classificacao = f"Escrita Modbus RTU ({nome_mb})"
+            elif fc in (1, 2, 3, 4):
+                categoria = "Leitura OT"
+                classificacao = f"Leitura Modbus RTU ({nome_mb})"
 
     elif protocolo_ot in ("CODESYS", "CODESYS Gateway"):
         operacao = "CODESYS"
@@ -3347,7 +3655,10 @@ def detectar_irregularidades_multi(resultado, lista_meta):
                 "Alvo": a.get("Origem", "-"),
                 "Arquivos envolvidos": 1,
                 "Evidência": a.get("Detalhe", ""),
-                "Ordem sugerida": "Colocar varredura antes de eventos OT/alteração na mesma origem.",
+                "Ordem sugerida": (
+                    "Revisar na timeline a origem do SYN scan e correlacionar com "
+                    "downloads, C2 ou atividade OT (se houver) da mesma origem."
+                ),
             })
 
     # 5) Sobreposição temporal estranha entre arquivos (mesmo host interno em janelas distantes com mesmo IOC)
@@ -3373,27 +3684,66 @@ def detectar_irregularidades_multi(resultado, lista_meta):
                     "Ordem sugerida": "Usar Nº pacote + Captura para desambiguar.",
                 })
 
-    # 6) Sequência típica de irregularidade: varredura → OT escrita → download
+    # 6) Sequências comportamentais (só menciona OT se houver evidência OT real)
     timeline = montar_timeline_eventos(resultado)
     if not timeline.empty:
         fontes_seq = timeline["Fonte"].tolist()
         cats = timeline["Categoria"].astype(str).str.lower().tolist()
         tem_scan = any("varredura" in c for c in cats)
-        tem_ot_alt = any("alteração" in c or "escrita" in c or "transferência ot" in c for c in cats)
+        tem_ot_alt = any(
+            ("alteração" in c or "escrita" in c or "transferência ot" in c)
+            and "ot" in c
+            for c in cats
+        )
+        # Fallback: categorias explícitas de alteração OT
+        if not tem_ot_alt:
+            tem_ot_alt = any(
+                c in ("alteração ot candidata", "transferência ot candidata", "anomalia ot")
+                or c.startswith("alteração ot")
+                for c in cats
+            )
+        # Confirma com eventos_ot (fonte de verdade)
+        eot_df = resultado.get("eventos_ot")
+        tem_eventos_ot = (
+            eot_df is not None
+            and hasattr(eot_df, "empty")
+            and (not eot_df.empty)
+        )
+        if not tem_eventos_ot:
+            tem_ot_alt = False
+
         tem_dl = any(f == "Download HTTP" for f in fontes_seq)
-        if tem_scan and (tem_ot_alt or tem_dl):
+
+        if tem_scan and tem_ot_alt:
             irregularidades.append({
                 "Severidade": "Alta",
-                "Tipo": "Sequência comportamental suspeita",
+                "Tipo": "Sequência comportamental suspeita (IT→OT)",
                 "Alvo": "Timeline consolidada",
                 "Arquivos envolvidos": n_arquivos,
                 "Evidência": (
                     "Na ordem temporal aparecem varredura e, em seguida, "
-                    "alteração/transferência OT e/ou download de executável."
+                    "eventos de alteração/transferência OT na captura."
                 ),
                 "Ordem sugerida": (
                     "1) Varredura → 2) Contato OT / escrita → 3) Transferência ou download. "
-                    "Revise a timeline completa abaixo."
+                    "Revise a timeline e valide no PCAP."
+                ),
+            })
+        elif tem_scan and tem_dl and not tem_ot_alt:
+            # Cenário IT puro (ex.: malware desktop) — não citar OT
+            irregularidades.append({
+                "Severidade": "Média",
+                "Tipo": "Sequência comportamental suspeita (scan + download)",
+                "Alvo": "Timeline consolidada",
+                "Arquivos envolvidos": n_arquivos,
+                "Evidência": (
+                    "Na ordem temporal aparecem possível varredura TCP e download "
+                    "de executável/payload via HTTP. Não há eventos OT confirmados."
+                ),
+                "Ordem sugerida": (
+                    "1) Varredura → 2) Downloads HTTP. "
+                    "Correlacionar origem do scan com clientes dos downloads; "
+                    "validar hashes e URLs no PCAP (podem ser legítimos ou maliciosos)."
                 ),
             })
 
@@ -5224,6 +5574,9 @@ def gerar_relatorio_analista(resultado, enriquecimento_externo=None):
 
     linhas.append("# Relatório analítico — Rede, Segurança IT e OT")
     linhas.append("")
+    linhas.append(f"> **{AVISO_ANALISE_PRELIMINAR}**  ")
+    linhas.append(f"> {AVISO_ANALISE_PRELIMINAR_TEXTO}")
+    linhas.append("")
     linhas.append(
         "*Documento gerado localmente a partir das heurísticas da captura. "
         "Não substitui investigação forense completa. "
@@ -5792,11 +6145,19 @@ def gerar_relatorio_analista_html(resultado, enriquecimento_externo=None):
         Severidade: {sev_nivel} ({sev_pontos}/100)
       </div>
     </div>
+    <div style="margin:16px 0;padding:14px 16px;border-radius:10px;border:1px solid #F59E0B;
+                background:#FEF3C7;color:#78350F;font-size:0.9rem;line-height:1.5;">
+      <strong>{AVISO_ANALISE_PRELIMINAR}</strong><br/>
+      {AVISO_ANALISE_PRELIMINAR_TEXTO}
+    </div>
     <article>
       {mapa_html}
       {corpo}
     </article>
-    <div class="footer">Analisador OT de PCAP · relatório gerado localmente</div>
+    <div class="footer">
+      Analisador OT de PCAP · relatório gerado localmente<br/>
+      <span style="color:#92400E;">{AVISO_ANALISE_PRELIMINAR_CURTO}</span>
+    </div>
   </div>
 </body>
 </html>
@@ -5900,6 +6261,11 @@ def _gerar_pdf_fallback(resultado, lista_meta=None):
     linhas.append("=" * 60)
     linhas.append("Processamento local · heuristicas OT · timeline unificada")
     linhas.append("")
+    linhas.append("*** " + AVISO_ANALISE_PRELIMINAR + " ***")
+    linhas.append(AVISO_ANALISE_PRELIMINAR_TEXTO)
+    linhas.append("")
+    linhas.append("-" * 60)
+    linhas.append("")
 
     def _len_df(df):
         if df is None:
@@ -5954,7 +6320,10 @@ def _gerar_pdf_fallback(resultado, lista_meta=None):
     _dump("7. DOWNLOADS", resultado.get("downloads_suspeitos"), ["Captura", "Tipo de arquivo", "SHA-256", "Severidade"])
     _dump("8. IOCs CANDIDATOS", resultado.get("iocs_candidatos"), ["Tipo", "IOC candidato", "Motivo"])
     _dump("9. PROTOCOLOS", resultado.get("protocolos"), ["Protocolo", "Pacotes"])
+    linhas.append("")
     linhas.append("Fim do relatorio.")
+    linhas.append(AVISO_ANALISE_PRELIMINAR_CURTO)
+    linhas.append(AVISO_ANALISE_PRELIMINAR_TEXTO)
     return _gerar_pdf_simples(linhas)
 
 
@@ -6039,6 +6408,21 @@ def _gerar_pdf_reportlab(resultado, lista_meta=None, progresso=None):
         "Mesmos dados da análise web: resumo, protocolos, OT, timeline, irregularidades, "
         "alertas, IOCs e mapa de topologia (visão geral, sem detalhe por IP).",
         pequeno,
+    ))
+    story.append(Spacer(1, 4))
+    aviso_estilo = ParagraphStyle(
+        "AvisoPrelim",
+        parent=pequeno,
+        textColor=colors.HexColor("#92400E"),
+        backColor=colors.HexColor("#FEF3C7"),
+        borderPadding=6,
+        spaceBefore=4,
+        spaceAfter=8,
+        leading=12,
+    )
+    story.append(Paragraph(
+        f"<b>{AVISO_ANALISE_PRELIMINAR}</b><br/>{AVISO_ANALISE_PRELIMINAR_TEXTO}",
+        aviso_estilo,
     ))
     story.append(Spacer(1, 6))
 
@@ -6239,7 +6623,11 @@ def _gerar_pdf_reportlab(resultado, lista_meta=None, progresso=None):
 
     story.append(Spacer(1, 12))
     story.append(Paragraph(
-        "Fim do relatório. Valide os indicadores no contexto operacional.",
+        f"<b>Fim do relatório.</b> {AVISO_ANALISE_PRELIMINAR_CURTO}",
+        pequeno,
+    ))
+    story.append(Paragraph(
+        AVISO_ANALISE_PRELIMINAR_TEXTO,
         pequeno,
     ))
 
@@ -6537,6 +6925,42 @@ def parsear_cabecalhos_http(bloco):
     return primeira, cabecalhos
 
 
+# Hosts/CDN frequentemente legítimos (atualização de software, CDN de app).
+# Não remove o download da lista — apenas reduz severidade automática.
+_HOSTS_ATUALIZACAO_COMUM = (
+    "windowsupdate.com",
+    "microsoft.com",
+    "update.microsoft.com",
+    "download.windowsupdate.com",
+    "gvt1.com",
+    "google.com",
+    "googleapis.com",
+    "gstatic.com",
+    "googleusercontent.com",
+    "skype.com",
+    "download.skype.com",
+    "apple.com",
+    "mzstatic.com",
+    "adobe.com",
+    "akamaihd.net",
+    "akamaized.net",
+    "cloudfront.net",
+    "office.net",
+    "office365.com",
+    "live.com",
+)
+
+
+def host_parece_atualizacao_legitima(host: str) -> bool:
+    if not host:
+        return False
+    h = host.lower().split(":")[0].strip(".")
+    for suf in _HOSTS_ATUALIZACAO_COMUM:
+        if h == suf or h.endswith("." + suf):
+            return True
+    return False
+
+
 def identificar_arquivo(corpo, fim_captura=None):
     """Retorna (tipo, severidade, análise_pe) com base na assinatura do conteúdo."""
     if corpo[:2] == b"MZ":
@@ -6730,6 +7154,19 @@ class RastreadorDownloadsHTTP:
         elif severidade == "Média" and contexto >= 3:
             severidade = "Alta"
 
+        # CDN/atualização conhecida: mantém o registro, mas não escala como "Alta"
+        # (vale para qualquer PCAP — desktop IT, OT com jump host, etc.)
+        if host_parece_atualizacao_legitima(host):
+            motivos.append(
+                "Host compatível com CDN/atualização de software comum "
+                "(severidade reduzida; validar se o ambiente deveria baixar daqui)."
+            )
+            if severidade == "Alta":
+                severidade = "Média"
+            # Porta padrão + host conhecido → Informativa
+            if porta_servidor in PORTAS_HTTP_PADRAO and contexto <= 2:
+                severidade = "Baixa"
+
         return {
             "Data/hora UTC": texto_data(resposta["instante"]),
             "Cliente": cliente,
@@ -6756,7 +7193,7 @@ class RastreadorDownloadsHTTP:
         }
 
 
-def analisar_pcap(caminho, limite, iocs_ips, iocs_dominios):
+def analisar_pcap(caminho, limite, iocs_ips, iocs_dominios, progresso=None):
     protocolos = Counter()
     origens = Counter()
     destinos = Counter()
@@ -6802,14 +7239,26 @@ def analisar_pcap(caminho, limite, iocs_ips, iocs_dominios):
     rastreador_http = RastreadorDownloadsHTTP()
 
     leitor = abrir_pcap(caminho)
+    # Portas que merecem inspeção OT/exposição (evita trabalho pesado em todo pacote)
+    _PORTAS_INTERESSE_OT = set(PORTAS_OT.keys()) | set(PORTAS_TRANSFERENCIA_OT)
+    _PORTAS_EXPOSICAO = {21, 22, 23, 25, 80, 110, 143, 445, 502, 102, 2404, 44818, 1883}
+    _INTERVALO_PROGRESSO = 1000  # atualiza UI a cada N pacotes
 
     try:
         for pacote in leitor:
-            if total >= limite:
+            # limite <= 0 significa processar TODOS os pacotes (sem corte)
+            if limite and limite > 0 and total >= limite:
                 limite_atingido = True
                 break
 
             total += 1
+
+            # Mantém a interface responsiva durante análises longas
+            if progresso is not None and (total % _INTERVALO_PROGRESSO == 0 or total == 1):
+                try:
+                    progresso(total, limite if (limite and limite > 0) else 0)
+                except Exception:
+                    pass
 
             try:
                 tamanho = len(pacote)
@@ -6905,35 +7354,49 @@ def analisar_pcap(caminho, limite, iocs_ips, iocs_dominios):
                     porta_destino,
                 )
 
-                detectar_exposicao(
-                    pacote,
-                    instante,
-                    origem,
-                    destino,
-                    porta_origem,
-                    porta_destino,
-                    fluxo,
-                    usuarios_fluxo,
-                    eventos,
-                    eventos_chaves,
-                    num_pacote=total,
-                )
+                # Exposição: só em portas típicas de credencial/arquivo (mais rápido)
+                if (porta_destino in _PORTAS_EXPOSICAO) or (porta_origem in _PORTAS_EXPOSICAO):
+                    detectar_exposicao(
+                        pacote,
+                        instante,
+                        origem,
+                        destino,
+                        porta_origem,
+                        porta_destino,
+                        fluxo,
+                        usuarios_fluxo,
+                        eventos,
+                        eventos_chaves,
+                        num_pacote=total,
+                    )
 
-                detectar_ot_pacote(
-                    pacote,
-                    instante,
-                    origem,
-                    destino,
-                    porta_origem,
-                    porta_destino,
-                    fluxo,
-                    eventos_ot,
-                    eventos_ot_chaves,
-                    detalhes_ot,
-                    num_pacote=total,
-                    fluxos_ot_meta=fluxos_ot_meta,
-                    tcp_buffers=tcp_buffers,
+                # OT: só quando porta/EtherType sugere protocolo industrial
+                _et = None
+                try:
+                    _et = ethertype_pacote(pacote)
+                except Exception:
+                    _et = None
+                _candidato_ot = (
+                    (porta_destino in _PORTAS_INTERESSE_OT)
+                    or (porta_origem in _PORTAS_INTERESSE_OT)
+                    or (_et is not None and _et in ETHERTYPES_OT)
                 )
+                if _candidato_ot:
+                    detectar_ot_pacote(
+                        pacote,
+                        instante,
+                        origem,
+                        destino,
+                        porta_origem,
+                        porta_destino,
+                        fluxo,
+                        eventos_ot,
+                        eventos_ot_chaves,
+                        detalhes_ot,
+                        num_pacote=total,
+                        fluxos_ot_meta=fluxos_ot_meta,
+                        tcp_buffers=tcp_buffers,
+                    )
 
                 if len(amostra) < LIMITE_PACOTES_AMOSTRA:
                     amostra.append(
@@ -7124,6 +7587,47 @@ def analisar_pcap(caminho, limite, iocs_ips, iocs_dominios):
             },
         )
 
+    # Alertas a partir de operações OT críticas observadas nos eventos
+    # (S7 Stop/Start/Upload/Write, Modbus write, DNP3 OPERATE, etc.)
+    for ev in eventos_ot:
+        cat = str(ev.get("Categoria") or "")
+        clas = str(ev.get("Classificação") or "")
+        op = str(ev.get("Operação") or "")
+        blob = f"{cat} {clas} {op}".lower()
+        sev = None
+        tipo = None
+        if "plc stop" in blob or "0x29" in blob:
+            sev, tipo = "Alta", "Comando PLC Stop (S7)"
+        elif "plc start" in blob or "pi-service" in blob or "0x28" in blob:
+            sev, tipo = "Alta", "Comando PLC Start / PI-Service (S7)"
+        elif "upload de bloco" in blob or "start upload" in blob:
+            sev, tipo = "Alta", "Upload de bloco S7"
+        elif "download de bloco" in blob or "request download" in blob:
+            sev, tipo = "Alta", "Download de bloco S7"
+        elif "write var" in blob:
+            sev, tipo = "Alta", "Escrita de variável S7"
+        elif "umas" in blob or "unity pro" in blob:
+            sev, tipo = "Alta", "Schneider UMAS — programação/upload PLC"
+        elif "alteração ot candidata" in cat.lower() and "modbus" in blob and "umas" not in blob:
+            sev, tipo = "Alta", "Escrita Modbus candidata"
+        elif "operate" in blob or "crob" in blob:
+            sev, tipo = "Alta", "Controle DNP3 (OPERATE/CROB)"
+        elif "transferência ot candidata" in cat.lower():
+            sev, tipo = "Média", "Transferência OT candidata"
+        if sev and tipo:
+            adicionar_alerta(
+                alertas,
+                alertas_chaves,
+                {
+                    "Severidade": sev,
+                    "Tipo": tipo,
+                    "Origem": ev.get("Origem", "-"),
+                    "Destino": ev.get("Destino", "-"),
+                    "Porta destino": ev.get("Porta destino", "-"),
+                    "Detalhe": ev.get("Detalhe") or op or clas,
+                },
+            )
+
     iocs_candidatos = gerar_iocs_candidatos(
         alertas,
         transferencias_ot,
@@ -7258,7 +7762,7 @@ def analisar_pcap(caminho, limite, iocs_ips, iocs_dominios):
 def render_rodape():
     """Rodapé no estilo informativo (inspirado em apackets.com)."""
     st.markdown(
-        """
+        f"""
         <div class="footer-apackets">
           <h4>Sobre esta análise</h4>
           <p>
@@ -7267,6 +7771,11 @@ def render_rodape():
             O motor reconstrói visão de hosts, protocolos, eventos OT, exposição em canais sem TLS,
             timeline unificada e irregularidades entre múltiplas capturas.
           </p>
+          <div style="margin:14px 0;padding:12px 14px;border-radius:8px;border:1px solid #F59E0B;
+                      background:#FEF3C7;color:#78350F;font-size:0.88rem;line-height:1.45;">
+            <strong>{AVISO_ANALISE_PRELIMINAR}</strong><br/>
+            {AVISO_ANALISE_PRELIMINAR_CURTO}
+          </div>
           <div class="cols">
             <div>
               <h4>Privacidade</h4>
@@ -7305,14 +7814,21 @@ with st.sidebar:
         st.markdown("---")
         st.markdown("**Ajustes da análise**")
         limite_pacotes = st.number_input(
-            "Máximo de pacotes",
-            min_value=1000,
-            max_value=5_000_000,
-            value=int(st.session_state.get("limite_pacotes", 200_000)),
+            "Máximo de pacotes (0 = todos)",
+            min_value=0,
+            max_value=50_000_000,
+            value=int(st.session_state.get("limite_pacotes", 0)),
             step=10_000,
             key="cfg_limite_pacotes",
+            help="0 = processar TODOS os pacotes, sem corte. "
+                 "Qualquer valor > 0 limita a quantidade analisada. "
+                 "Capturas grandes demoram mais; a barra de progresso mostra o avanço percentual.",
         )
         st.session_state["limite_pacotes"] = limite_pacotes
+        if limite_pacotes == 0:
+            st.caption("Sem limite: todos os pacotes serão processados. A barra indica o avanço.")
+        else:
+            st.caption(f"Limite ativo: {limite_pacotes:,} pacotes por arquivo.".replace(",", "."))
         arquivo_ioc = st.file_uploader(
             "Lista local de IOCs (opcional)",
             type=["txt", "csv"],
@@ -7332,7 +7848,7 @@ with st.sidebar:
         )
         st.markdown("---")
     else:
-        limite_pacotes = st.session_state.get("limite_pacotes", 200_000)
+        limite_pacotes = st.session_state.get("limite_pacotes", 0)
         arquivo_ioc = st.session_state.get("cfg_arquivo_ioc")
 
     # 3) Gerar PDF — uma geração por vez (evita sobrecarga)
@@ -7469,6 +7985,7 @@ with st.sidebar:
                 "Relatório pronto. O download não trava a página — "
                 "continue navegando enquanto o arquivo é salvo."
             )
+        st.caption(f"⚠️ {AVISO_ANALISE_PRELIMINAR_CURTO}")
     elif st.session_state.get("pdf_relatorio_ok") is False:
         st.error(
             f"Falha ao gerar PDF: {st.session_state.get('pdf_relatorio_erro', 'erro desconhecido')}"
@@ -7574,6 +8091,10 @@ if st.session_state.get("_pdf_arquivos_chave") != _nomes_arq:
     st.session_state["relatorio_analista_html"] = None
     st.session_state["abrir_aba_relatorio"] = False
     st.session_state["abrir_relatorio_browser"] = False
+    # Nova seleção de arquivos → força reanálise
+    st.session_state.pop("_chave_analise", None)
+    st.session_state["resultado_analise"] = None
+    st.session_state["lista_resultados_meta"] = None
 
 if not arquivos:
     st.info(
@@ -7591,30 +8112,103 @@ for arq in arquivos:
 
 caminhos_temporarios = []
 
+# Chave de cache: mesmos arquivos + limite + IOCs → não reanalisa a cada clique na UI
+_ioc_nome = getattr(arquivo_ioc, "name", None) if arquivo_ioc is not None else None
+_chave_analise = (
+    tuple(sorted((a.name, int(getattr(a, "size", 0) or 0)) for a in arquivos)),
+    int(limite_pacotes) if limite_pacotes is not None else 0,
+    _ioc_nome,
+)
+
+_cache_ok = (
+    st.session_state.get("_chave_analise") == _chave_analise
+    and st.session_state.get("resultado_analise") is not None
+    and st.session_state.get("lista_resultados_meta") is not None
+)
+
 try:
-    lista_resultados = []  # (nome, sha256, resultado)
+    if _cache_ok:
+        resultado = st.session_state["resultado_analise"]
+        lista_resultados = st.session_state["lista_resultados_meta"]
+        st.caption("Resultado em cache — PCAP não foi reprocessado. Altere o arquivo ou o limite para nova análise.")
+    else:
+        lista_resultados = []  # (nome, sha256, resultado)
 
-    barra = st.progress(0.0, text="Preparando análise multi-arquivo…")
-    for idx, arq in enumerate(arquivos):
-        barra.progress(
-            idx / max(len(arquivos), 1),
-            text=f"Analisando {arq.name} ({idx + 1}/{len(arquivos)})…",
-        )
-        caminho, sha256 = salvar_upload(arq)
-        caminhos_temporarios.append(caminho)
-        res = analisar_pcap(
-            caminho,
-            int(limite_pacotes),
-            iocs_ips,
-            iocs_dominios,
-        )
-        lista_resultados.append((arq.name, sha256, res))
+        barra = st.progress(0.0, text="Preparando análise multi-arquivo…")
+        for idx, arq in enumerate(arquivos):
+            base_frac = idx / max(len(arquivos), 1)
+            span = 1.0 / max(len(arquivos), 1)
 
-    barra.progress(1.0, text="Mesclando resultados e montando timeline…")
-    resultado = mesclar_resultados(lista_resultados)
-    irregularidades = detectar_irregularidades_multi(resultado, lista_resultados)
-    resultado["irregularidades"] = irregularidades
-    barra.empty()
+            try:
+                _tam = int(getattr(arq, "size", 0) or 0)
+                _estimativa = max(int(_tam / 600), 1) if _tam else 0
+            except Exception:
+                _estimativa = 0
+
+            def _prog_fabrica(b=base_frac, s=span, nome=arq.name, i=idx, n=len(arquivos), est=_estimativa):
+                def _prog(atual, lim):
+                    if lim and lim > 0:
+                        base_total = lim
+                    elif est > 0:
+                        base_total = est
+                    else:
+                        base_total = 0
+                    if base_total > 0:
+                        pct_arq = min(atual / base_total, 0.99)
+                        pct_txt = f"{pct_arq * 100:.1f}%"
+                        frac = b + s * pct_arq
+                    else:
+                        pct_arq = 1.0 - (1.0 / (1.0 + atual / 50000.0))
+                        pct_txt = f"{atual:,} pcts".replace(",", ".")
+                        frac = b + s * min(pct_arq, 0.95)
+                    barra.progress(
+                        min(max(frac, 0.01), 0.99),
+                        text=(
+                            f"Analisando {nome} ({i + 1}/{n}) — {pct_txt} "
+                            f"· {atual:,} pacotes processados"
+                        ).replace(",", "."),
+                    )
+                return _prog
+
+            barra.progress(
+                base_frac,
+                text=f"Analisando {arq.name} ({idx + 1}/{len(arquivos)}) — iniciando…",
+            )
+            caminho, sha256 = salvar_upload(arq)
+            caminhos_temporarios.append(caminho)
+            res = analisar_pcap(
+                caminho,
+                int(limite_pacotes),
+                iocs_ips,
+                iocs_dominios,
+                progresso=_prog_fabrica(),
+            )
+            lista_resultados.append((arq.name, sha256, res))
+
+        barra.progress(1.0, text="Mesclando resultados e montando timeline…")
+        resultado = mesclar_resultados(lista_resultados)
+        irregularidades = detectar_irregularidades_multi(resultado, lista_resultados)
+        resultado["irregularidades"] = irregularidades
+        barra.progress(1.0, text="Análise concluída (100%).")
+        barra.empty()
+
+        st.session_state["resultado_analise"] = resultado
+        st.session_state["lista_resultados_meta"] = lista_resultados
+        st.session_state["_chave_analise"] = _chave_analise
+
+    st.warning(
+        f"**{AVISO_ANALISE_PRELIMINAR}**  \n"
+        f"{AVISO_ANALISE_PRELIMINAR_TEXTO}"
+    )
+    try:
+        _rb = resumo_base()
+        st.caption(
+            f"Base offline de PLCs v{_rb.get('versao', '?')} · "
+            f"fabricantes: {', '.join(_rb.get('fabricantes', [])[:6])}… · "
+            "protocolos fora da base serão sinalizados para extensão do código."
+        )
+    except Exception:
+        pass
 
     col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -7668,7 +8262,7 @@ try:
 
     if resultado["limite"]:
         st.warning(
-            "O limite de pacotes foi atingido em pelo menos um arquivo. "
+            "Limite de pacotes configurado pelo usuário foi atingido em pelo menos um arquivo. "
             "A análise pode estar parcial."
         )
 
