@@ -504,14 +504,35 @@ def texto_fluxo(chave):
 
 
 def id_usuario(usuario):
+    """Mostra o nome de usuário na análise; nunca a senha."""
     if not usuario:
         return "Não identificado"
+    u = str(usuario).strip()
+    u = "".join(ch for ch in u if ch.isprintable() and ch not in "\r\n\t")
+    if not u:
+        return "Não identificado"
+    if len(u) > 64:
+        u = u[:61] + "..."
+    return u
 
-    valor_hash = hashlib.sha256(
-        usuario.encode("utf-8", errors="ignore")
-    ).hexdigest()
 
-    return f"usuario_{valor_hash[:10]}"
+def redigir_senha_em_texto(texto):
+    """Remove valores de senha de qualquer texto antes de gravar em alerta/relatório."""
+    if not texto:
+        return texto
+    t = str(texto)
+    t = re.sub(
+        r"(?i)\b(password|passwd|pwd|senha|pass)\s*[=:]\s*[^&\s\r\n\"']+",
+        r"\1=[REDACTED]",
+        t,
+    )
+    t = re.sub(r"(?im)\bPASS\s+\S+", "PASS [REDACTED]", t)
+    t = re.sub(
+        r"(?i)(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=]+",
+        r"\1[REDACTED]",
+        t,
+    )
+    return t
 
 
 def mascarar_arquivo(nome):
@@ -718,9 +739,10 @@ def detectar_exposicao(
                         "Não identificado",
                     ),
                     "Ação": "Autenticação FTP (PASS)",
-                    "Detalhe": (
-                        "Comando FTP PASS identificado. A senha não foi "
-                        "exibida nem armazenada."
+                    "Detalhe": redigir_senha_em_texto(
+                        "Comando FTP PASS identificado. Usuário observado: "
+                        + str(usuarios_fluxo.get(fluxo, "Não identificado"))
+                        + ". A senha não foi exibida nem armazenada."
                     ),
                 },
             )
@@ -786,9 +808,10 @@ def detectar_exposicao(
                         fluxo,
                         "Não identificado",
                     ),
-                    "Detalhe": (
-                        "Comando POP3 PASS identificado. A senha não foi "
-                        "exibida nem armazenada."
+                    "Detalhe": redigir_senha_em_texto(
+                        "Comando POP3 PASS identificado. Usuário observado: "
+                        + str(usuarios_fluxo.get(fluxo, "Não identificado"))
+                        + ". A senha não foi exibida nem armazenada."
                     ),
                 },
             )
@@ -871,11 +894,18 @@ def detectar_exposicao(
         )
 
         if basic or senha_formulario:
-            detalhe = (
-                "Cabeçalho HTTP Basic Authorization identificado."
-                if basic
-                else "Campo de senha em possível formulário HTTP identificado."
-            )
+            user_visivel = usuario_hash if usuario_hash and usuario_hash != "Não identificado" else "Não identificado"
+            if basic:
+                detalhe = (
+                    f"Cabeçalho HTTP Basic Authorization identificado. "
+                    f"Usuário observado: {user_visivel}. A senha não foi exibida nem armazenada."
+                )
+            else:
+                detalhe = (
+                    f"Campo de senha em possível formulário HTTP identificado. "
+                    f"Usuário observado: {user_visivel}. A senha não foi exibida nem armazenada."
+                )
+            detalhe = redigir_senha_em_texto(detalhe)
 
             adicionar_evento(
                 eventos,
@@ -884,12 +914,12 @@ def detectar_exposicao(
                     **base,
                     "Categoria": "Possível credencial exposta",
                     "Protocolo": "HTTP sem TLS",
-                    "Usuário identificado": usuario_hash,
-                    "Detalhe": (
-                        f"{detalhe} A senha não foi exibida nem armazenada."
-                    ),
+                    "Usuário identificado": user_visivel,
+                    "Ação": "Credencial em claro (HTTP)",
+                    "Detalhe": detalhe,
                 },
             )
+
 
         arquivo = re.search(
             rb'(?i)content-disposition:\s*.*?filename="?([^"\r\n;]+)',
@@ -1989,6 +2019,641 @@ def analisar_ads_payload(payload):
     ):
         return {"ADS": True, "Evidência": "estrutura compatível com AMS/TCP"}
     return None
+
+
+# ---------------------------------------------------------------------------
+# Catálogo de alertas alinhado a plataformas OT de mercado
+# (detectáveis offline a partir de PCAP)
+# ---------------------------------------------------------------------------
+CATALOGO_ALERTAS_OT = {
+    "Host Scan": {
+        "severidade": "Média",
+        "familia": "reconhecimento",
+        "descricao": "Varredura de muitos hosts (poucas portas por destino).",
+    },
+    "Port Scan": {
+        "severidade": "Média",
+        "familia": "reconhecimento",
+        "descricao": "Varredura de muitas portas em poucos hosts.",
+    },
+    "Network Scanners Alert": {
+        "severidade": "Média",
+        "familia": "reconhecimento",
+        "descricao": "Comportamento compatível com scanner de rede.",
+    },
+    "Network Scanners Communicating with Control and Process Devices": {
+        "severidade": "Alta",
+        "familia": "reconhecimento",
+        "descricao": "Origem com perfil de scan atingindo portas OT/ICS.",
+    },
+    "Failed Login": {
+        "severidade": "Baixa",
+        "familia": "autenticacao",
+        "descricao": "Falha de autenticação em protocolo legível.",
+    },
+    "Multiple Failed Login Attempts": {
+        "severidade": "Alta",
+        "familia": "autenticacao",
+        "descricao": "Múltiplas falhas de login em janela curta.",
+    },
+    "Weak/Default Password": {
+        "severidade": "Alta",
+        "familia": "autenticacao",
+        "descricao": "Uso de credencial padrão ou fraca observada.",
+    },
+    "External Plaintext Credentials Transmission": {
+        "severidade": "Alta",
+        "familia": "autenticacao",
+        "descricao": "Credencial em claro na rede.",
+    },
+    "Executable File Transfer": {
+        "severidade": "Alta",
+        "familia": "arquivo",
+        "descricao": "Transferência de executável/payload via HTTP.",
+    },
+    "Suspicious File Transfer": {
+        "severidade": "Média",
+        "familia": "arquivo",
+        "descricao": "Transferência de arquivo suspeita (FTP/SMB/HTTP).",
+    },
+    "Configuration Download": {
+        "severidade": "Alta",
+        "familia": "programacao_ot",
+        "descricao": "Download de configuração/lógica do controlador.",
+    },
+    "Configuration Upload": {
+        "severidade": "Alta",
+        "familia": "programacao_ot",
+        "descricao": "Upload de configuração/lógica para o controlador.",
+    },
+    "Firmware Download": {
+        "severidade": "Alta",
+        "familia": "programacao_ot",
+        "descricao": "Transferência candidata de firmware.",
+    },
+    "Mode Change": {
+        "severidade": "Alta",
+        "familia": "controle_ot",
+        "descricao": "Mudança de modo do controlador (start/stop/control).",
+    },
+    "Controller Not in Run Mode": {
+        "severidade": "Alta",
+        "familia": "controle_ot",
+        "descricao": "Comando de parada de CPU/PLC observado.",
+    },
+    "Memory Reset": {
+        "severidade": "Alta",
+        "familia": "controle_ot",
+        "descricao": "Indício de reset de memória/controle agressivo.",
+    },
+    "Online Edit": {
+        "severidade": "Alta",
+        "familia": "programacao_ot",
+        "descricao": "Edição/programação online (UMAS/engenharia).",
+    },
+    "OT Activity with External Entities": {
+        "severidade": "Alta",
+        "familia": "segmentacao",
+        "descricao": "Comunicação OT com entidade externa/pública.",
+    },
+    "Internet Communication": {
+        "severidade": "Média",
+        "familia": "segmentacao",
+        "descricao": "Comunicação com Internet a partir da captura.",
+    },
+    "Unsecured Protocols": {
+        "severidade": "Média",
+        "familia": "higiene",
+        "descricao": "Protocolo inseguro (Telnet, FTP claro, HTTP clear em contexto sensível).",
+    },
+    "SMB Communication": {
+        "severidade": "Baixa",
+        "familia": "lateral",
+        "descricao": "Tráfego SMB/CIFS observado.",
+    },
+    "Denial of Service": {
+        "severidade": "Alta",
+        "familia": "disponibilidade",
+        "descricao": "Padrão compatível com saturamento/flood SYN.",
+    },
+    "New Asset": {
+        "severidade": "Baixa",
+        "familia": "inventario",
+        "descricao": "Endpoint OT observado na captura (inventário da janela).",
+    },
+    "Suspicious Activity": {
+        "severidade": "Média",
+        "familia": "generico",
+        "descricao": "Atividade anômala agregada.",
+    },
+    "Policy Violation": {
+        "severidade": "Média",
+        "familia": "politica",
+        "descricao": "Violação de política derivada de heurística offline.",
+    },
+
+    # --- Nomes alinhados a Nozomi Guardian (SIGN:* / VI:*) ---
+    "Bad ip reputation": {
+        "severidade": "Alta",
+        "familia": "intel",
+        "descricao": "Nozomi SIGN:MALICIOUS-IP — IP com má reputação observado na captura (heurística offline limitada).",
+        "nozomi_id": "SIGN:MALICIOUS-IP",
+    },
+    "Bad IP reputation (new node)": {
+        "severidade": "Alta",
+        "familia": "intel",
+        "descricao": "Nozomi VI:NEW-NODE:MALICIOUS-IP — novo nó associado a IP de má reputação.",
+        "nozomi_id": "VI:NEW-NODE:MALICIOUS-IP",
+    },
+    "Cleartext password": {
+        "severidade": "Alta",
+        "familia": "autenticacao",
+        "descricao": "Nozomi SIGN:CLEARTEXT-PASSWORD — senha em claro na rede.",
+        "nozomi_id": "SIGN:CLEARTEXT-PASSWORD",
+    },
+    "Illegal parameters request": {
+        "severidade": "Média",
+        "familia": "protocolo_ot",
+        "descricao": "Nozomi SIGN:ILLEGAL-PARAMETERS — parâmetros ilegais em pedido OT.",
+        "nozomi_id": "SIGN:ILLEGAL-PARAMETERS",
+    },
+    "Link RST request by Producer": {
+        "severidade": "Média",
+        "familia": "transporte",
+        "descricao": "RST TCP observado de forma anómala (produtor encerra sessão).",
+        "nozomi_id": None,
+    },
+    "Malformed Network/Transport layer": {
+        "severidade": "Média",
+        "familia": "protocolo",
+        "descricao": "Nozomi SIGN:NETWORK-MALFORMED — pacote malformado em L3/L4.",
+        "nozomi_id": "SIGN:NETWORK-MALFORMED",
+    },
+    "Malformed traffic": {
+        "severidade": "Média",
+        "familia": "protocolo",
+        "descricao": "Nozomi SIGN:MALFORMED-TRAFFIC — tráfego L7 malformado (DPI).",
+        "nozomi_id": "SIGN:MALFORMED-TRAFFIC",
+    },
+    "Missing or unknown device": {
+        "severidade": "Baixa",
+        "familia": "inventario",
+        "descricao": "Dispositivo/endpoint não catalogado na base offline ou só visto nesta captura.",
+        "nozomi_id": None,
+    },
+    "MITM attack": {
+        "severidade": "Alta",
+        "familia": "ameaca",
+        "descricao": "Nozomi SIGN:MITM — possível ARP poisoning / MitM.",
+        "nozomi_id": "SIGN:MITM",
+    },
+    "Multiple Access Denied events": {
+        "severidade": "Média",
+        "familia": "autenticacao",
+        "descricao": "Nozomi SIGN:MULTIPLE-ACCESS-DENIED — múltiplos acessos negados.",
+        "nozomi_id": "SIGN:MULTIPLE-ACCESS-DENIED",
+    },
+    "Multiple unsuccessful logins": {
+        "severidade": "Alta",
+        "familia": "autenticacao",
+        "descricao": "Nozomi SIGN:MULTIPLE-UNSUCCESSFUL-LOGINS — várias falhas de login.",
+        "nozomi_id": "SIGN:MULTIPLE-UNSUCCESSFUL-LOGINS",
+    },
+    "Network Scan": {
+        "severidade": "Média",
+        "familia": "reconhecimento",
+        "descricao": "Nozomi SIGN:NETWORK-SCAN / INCIDENT:PORT-SCAN — varredura de rede.",
+        "nozomi_id": "SIGN:NETWORK-SCAN",
+    },
+    "Packet rule match": {
+        "severidade": "Média",
+        "familia": "assinatura",
+        "descricao": "Match de regra/heurística offline de pacote (equivalente a packet rule).",
+        "nozomi_id": None,
+    },
+    "Process time issue": {
+        "severidade": "Baixa",
+        "familia": "processo",
+        "descricao": "Inconsistência temporal suspeita nos timestamps da captura.",
+        "nozomi_id": None,
+    },
+    "Protocol-based flood": {
+        "severidade": "Alta",
+        "familia": "disponibilidade",
+        "descricao": "Flood baseado em protocolo (muitos pedidos OT/ICS).",
+        "nozomi_id": None,
+    },
+    "Suspicious time value": {
+        "severidade": "Baixa",
+        "familia": "protocolo",
+        "descricao": "Valor de tempo suspeito em protocolo industrial.",
+        "nozomi_id": None,
+    },
+    "TCP flood": {
+        "severidade": "Alta",
+        "familia": "disponibilidade",
+        "descricao": "Nozomi SIGN:TCP-FLOOD / SIGN:TCP-SYN-FLOOD — flood TCP/SYN.",
+        "nozomi_id": "SIGN:TCP-SYN-FLOOD",
+    },
+    "Unsupported function request": {
+        "severidade": "Média",
+        "familia": "protocolo_ot",
+        "descricao": "Nozomi SIGN:UNSUPPORTED-FUNC — função não suportada/desconhecida no protocolo OT.",
+        "nozomi_id": "SIGN:UNSUPPORTED-FUNC",
+    },
+    "Weak password": {
+        "severidade": "Alta",
+        "familia": "autenticacao",
+        "descricao": "Nozomi SIGN:PASSWORD:WEAK — senha fraca observada.",
+        "nozomi_id": "SIGN:PASSWORD:WEAK",
+    },
+
+}
+
+
+
+def gerar_alertas_catalogo_mercado(
+    alertas,
+    alertas_chaves,
+    *,
+    syn_destinos,
+    syn_portas_por_origem,
+    syn_hosts_por_origem,
+    syn_para_ot,
+    fluxos,
+    eventos_ot,
+    downloads_suspeitos,
+    externos,
+    eventos=None,
+):
+    """
+    Gera alertas com nomes alinhados a plataformas OT de mercado,
+    somente quando houver evidência derivável do PCAP (offline).
+    """
+    eventos = eventos or []
+
+    def _emit(tipo, origem="-", destino="-", porta="-", detalhe="", sev=None, usuario=None):
+        meta = CATALOGO_ALERTAS_OT.get(tipo, {})
+        det = redigir_senha_em_texto(detalhe or meta.get("descricao", ""))
+        if usuario and str(usuario) not in ("", "-", "Não identificado") and "Usuário:" not in det:
+            det = redigir_senha_em_texto(f"{det} Usuário: {usuario}.")
+        row = {
+            "Severidade": sev or meta.get("severidade", "Média"),
+            "Tipo": tipo,
+            "Origem": origem or "-",
+            "Destino": destino or "-",
+            "Porta destino": porta if porta not in (None, "") else "-",
+            "Detalhe": det,
+            "Família": meta.get("familia", "catalogo"),
+        }
+        if usuario and str(usuario) not in ("", "-"):
+            row["Usuário identificado"] = str(usuario)
+        adicionar_alerta(alertas, alertas_chaves, row)
+
+    # --- Host Scan / Port Scan / Network Scanners ---
+    for origem, destinos_unicos in syn_destinos.items():
+        n_pairs = len(destinos_unicos)
+        n_hosts = len(syn_hosts_por_origem.get(origem, set()))
+        n_portas = len(syn_portas_por_origem.get(origem, set()))
+        n_ot = len(syn_para_ot.get(origem, set()))
+
+        if n_hosts >= 20 and n_portas <= 15:
+            _emit(
+                "Host Scan",
+                origem=origem,
+                detalhe=f"SYN sem ACK para {n_hosts} hosts únicos ({n_pairs} pares host:porta).",
+                sev="Alta" if n_hosts >= 100 else "Média",
+            )
+            _emit(
+                "Network Scanners Alert",
+                origem=origem,
+                detalhe=f"Perfil de scanner: {n_hosts} hosts, {n_portas} portas distintas.",
+            )
+        if n_portas >= 20 and n_hosts <= 15:
+            _emit(
+                "Port Scan",
+                origem=origem,
+                detalhe=f"SYN sem ACK para {n_portas} portas distintas em {n_hosts} host(s).",
+                sev="Alta" if n_portas >= 100 else "Média",
+            )
+            _emit(
+                "Network Scanners Alert",
+                origem=origem,
+                detalhe=f"Perfil de port scan: {n_portas} portas, {n_hosts} hosts.",
+            )
+        if n_ot >= 3 or (n_ot >= 1 and (n_hosts >= 10 or n_portas >= 10)):
+            _emit(
+                "Network Scanners Communicating with Control and Process Devices",
+                origem=origem,
+                detalhe=(
+                    f"Origem com varredura atingiu {n_ot} alvo(s) em porta(s) OT/ICS "
+                    f"(ex.: {', '.join(list(syn_para_ot.get(origem, set()))[:5])})."
+                ),
+                sev="Alta",
+            )
+        # SYN flood / DoS heurística
+        if n_pairs >= 500:
+            _emit(
+                "Denial of Service",
+                origem=origem,
+                detalhe=f"Volume muito alto de SYN sem ACK ({n_pairs} alvos host:porta) — possível flood.",
+                sev="Alta",
+            )
+
+    # --- OT external / Internet ---
+    for ip, dados in (externos or {}).items():
+        servicos = dados.get("Serviços") or set()
+        serv_txt = ", ".join(sorted(list(servicos))[:8]) if servicos else "-"
+        _emit(
+            "Internet Communication",
+            origem=ip,
+            detalhe=f"IP público observado; fluxos={dados.get('Fluxos', 0)}; serviços={serv_txt}.",
+            sev="Média",
+        )
+
+    # --- Unsecured protocols + SMB from flows ---
+    portas_inseguras = {21: "FTP", 23: "Telnet", 69: "TFTP", 161: "SNMP", 512: "rexec", 513: "rlogin", 514: "rsh"}
+    for chave, dados in fluxos.items():
+        transporte, ip_a, porta_a, ip_b, porta_b = chave
+        for ip_local, ip_rem, porta in (
+            (ip_a, ip_b, porta_b),
+            (ip_b, ip_a, porta_a),
+        ):
+            if porta is None:
+                continue
+            p = int(porta)
+            if p in portas_inseguras:
+                _emit(
+                    "Unsecured Protocols",
+                    origem=ip_local,
+                    destino=ip_rem,
+                    porta=p,
+                    detalhe=f"Protocolo inseguro {portas_inseguras[p]} (porta {p}) entre {ip_local} e {ip_rem}.",
+                )
+            if p in (445, 139):
+                _emit(
+                    "SMB Communication",
+                    origem=ip_local,
+                    destino=ip_rem,
+                    porta=p,
+                    detalhe=f"Tráfego SMB/CIFS (porta {p}); pacotes={dados.get('Pacotes', 0)}.",
+                )
+
+    # --- Downloads / executable transfer ---
+    for item in downloads_suspeitos or []:
+        _emit(
+            "Executable File Transfer",
+            origem=item.get("Servidor", "-"),
+            destino=item.get("Cliente", "-"),
+            porta=item.get("Porta servidor", "-"),
+            detalhe=(
+                f"{item.get('Tipo de arquivo', 'arquivo')}; SHA-256 {item.get('SHA-256', '-')}; "
+                f"{item.get('Motivos', '')}"
+            ),
+            sev=item.get("Severidade") or "Alta",
+        )
+        _emit(
+            "Suspicious File Transfer",
+            origem=item.get("Servidor", "-"),
+            destino=item.get("Cliente", "-"),
+            detalhe=f"Transferência HTTP de payload/executável observada.",
+        )
+
+    # --- Eventos OT → alertas de mercado ---
+    for ev in eventos_ot or []:
+        cat = str(ev.get("Categoria") or "").lower()
+        clas = str(ev.get("Classificação") or "").lower()
+        op = str(ev.get("Operação") or "").lower()
+        det = str(ev.get("Detalhe") or "")
+        blob = f"{cat} {clas} {op} {det}".lower()
+        o = ev.get("Origem", "-")
+        d = ev.get("Destino", "-")
+        porta = ev.get("Porta destino", "-")
+
+        if "plc stop" in blob or "0x29" in blob or "controller not" in blob:
+            _emit("Controller Not in Run Mode", origem=o, destino=d, porta=porta, detalhe=det or op)
+            _emit("Mode Change", origem=o, destino=d, porta=porta, detalhe=det or op)
+        if "pi-service" in blob or "0x28" in blob or "plc start" in blob:
+            _emit("Mode Change", origem=o, destino=d, porta=porta, detalhe=det or op)
+        if "upload" in blob and ("s7" in blob or "bloco" in blob or "umas" in blob):
+            _emit("Configuration Upload", origem=o, destino=d, porta=porta, detalhe=det or op)
+            if "umas" in blob or "unity" in blob:
+                _emit("Online Edit", origem=o, destino=d, porta=porta, detalhe=det or op)
+        if "download" in blob and ("s7" in blob or "bloco" in blob or "umas" in blob):
+            _emit("Configuration Download", origem=o, destino=d, porta=porta, detalhe=det or op)
+        if "firmware" in blob:
+            _emit("Firmware Download", origem=o, destino=d, porta=porta, detalhe=det or op)
+        if "memory reset" in blob or "reset" in clas and "cip" in blob:
+            _emit("Memory Reset", origem=o, destino=d, porta=porta, detalhe=det or op)
+        if "umas" in blob or "unity pro" in blob:
+            _emit("Online Edit", origem=o, destino=d, porta=porta, detalhe=det or "Schneider UMAS / engenharia")
+            _emit("Configuration Upload", origem=o, destino=d, porta=porta, detalhe=det or op)
+
+    # --- Credenciais / login: usuário visível; senha NUNCA ---
+    falhas_login = Counter()
+    for ev in eventos or []:
+        cat = str(ev.get("Categoria") or "").lower()
+        det_raw = str(ev.get("Detalhe") or "")
+        det = det_raw.lower()
+        acao = str(ev.get("Ação") or "").lower()
+        blob = f"{cat} {det} {acao}"
+        o = ev.get("Origem", "-")
+        d = ev.get("Destino", "-")
+        user = str(ev.get("Usuário identificado") or "Não identificado")
+        det_safe = redigir_senha_em_texto(det_raw)
+        if "credencial" in blob or "password" in blob or "senha" in blob or "pass " in blob:
+            user_l = user.lower()
+            if user_l in {
+                "admin", "root", "administrator", "guest", "user", "default", "test", "operator"
+            } or any(x in user_l for x in ("admin", "default")):
+                _emit(
+                    "Weak/Default Password",
+                    origem=o,
+                    destino=d,
+                    usuario=user,
+                    detalhe=(det_safe or "Credencial em claro com usuário de risco/padrão.")
+                    + " A senha não é exibida.",
+                )
+                _emit(
+                    "Weak password",
+                    origem=o,
+                    destino=d,
+                    usuario=user,
+                    detalhe=f"Usuário de risco/padrão: {user}. Senha não exibida.",
+                )
+            _emit(
+                "External Plaintext Credentials Transmission",
+                origem=o,
+                destino=d,
+                usuario=user,
+                detalhe=(det_safe or "Credencial em protocolo legível.") + " A senha não é exibida.",
+            )
+            _emit(
+                "Cleartext password",
+                origem=o,
+                destino=d,
+                usuario=user,
+                detalhe=f"Senha em claro detectada (valor omitido).",
+            )
+        if "login" in blob and any(x in blob for x in ("fail", "falha", "invalid", "denied", "incorrect")):
+            falhas_login[o] += 1
+            _emit(
+                "Failed Login",
+                origem=o,
+                destino=d,
+                usuario=user,
+                detalhe=det_safe or "Falha de login.",
+            )
+        if "telnet" in blob or ("ftp" in blob and "pass" in blob):
+            _emit(
+                "Unsecured Protocols",
+                origem=o,
+                destino=d,
+                usuario=user,
+                detalhe=det_safe or "Protocolo com autenticação em claro.",
+            )
+
+    for origem, n in falhas_login.items():
+        if n >= 3:
+            _emit(
+                "Multiple Failed Login Attempts",
+                origem=origem,
+                detalhe=f"{n} falhas de login observadas para a origem na captura.",
+                sev="Alta",
+            )
+
+    # --- New Asset: endpoints OT únicos ---
+    ips_ot = set()
+    for ev in eventos_ot or []:
+        for k in ("Origem", "Destino"):
+            ip = ev.get(k)
+            if ip and ip != "-":
+                ips_ot.add(ip)
+    for ip in sorted(ips_ot)[:50]:
+        _emit(
+            "New Asset",
+            origem=ip,
+            detalhe=f"Endpoint OT observado nesta captura (inventário offline da janela): {ip}.",
+            sev="Baixa",
+        )
+        _emit(
+            "Missing or unknown device",
+            origem=ip,
+            detalhe=f"Dispositivo OT visto só nesta captura (sem inventário histórico offline): {ip}.",
+            sev="Baixa",
+        )
+
+    # --- Aliases Nozomi para as mesmas evidências ---
+    # Network Scan (nome Nozomi)
+    for origem, destinos_unicos in syn_destinos.items():
+        n_hosts = len(syn_hosts_por_origem.get(origem, set()))
+        n_portas = len(syn_portas_por_origem.get(origem, set()))
+        n_pairs = len(destinos_unicos)
+        if n_hosts >= 20 or n_portas >= 20:
+            _emit(
+                "Network Scan",
+                origem=origem,
+                detalhe=f"Nozomi-equivalent SIGN:NETWORK-SCAN: {n_hosts} hosts, {n_portas} portas, {n_pairs} pares SYN.",
+                sev="Alta" if max(n_hosts, n_portas) >= 100 else "Média",
+            )
+        if n_pairs >= 200:
+            _emit(
+                "TCP flood",
+                origem=origem,
+                detalhe=f"Nozomi-equivalent SIGN:TCP-SYN-FLOOD: {n_pairs} SYN sem ACK.",
+                sev="Alta",
+            )
+            _emit(
+                "Protocol-based flood",
+                origem=origem,
+                detalhe=f"Volume elevado de tentativas de conexão ({n_pairs}).",
+                sev="Alta",
+            )
+
+    # Cleartext / weak password (aliases Nozomi)
+    for ev in eventos or []:
+        cat = str(ev.get("Categoria") or "").lower()
+        det = str(ev.get("Detalhe") or "").lower()
+        blob = f"{cat} {det}"
+        o = ev.get("Origem", "-")
+        d = ev.get("Destino", "-")
+        # Cleartext/Weak já tratados no bloco de credenciais (usuário visível, senha omitida).
+
+    for origem, n in falhas_login.items():
+        if n >= 3:
+            _emit(
+                "Multiple unsuccessful logins",
+                origem=origem,
+                detalhe=f"Nozomi SIGN:MULTIPLE-UNSUCCESSFUL-LOGINS equivalent: {n} falhas.",
+                sev="Alta",
+            )
+            _emit(
+                "Multiple Access Denied events",
+                origem=origem,
+                detalhe=f"{n} eventos de acesso negado/falha de login.",
+            )
+
+    # Unsupported function / illegal parameters from OT events
+    for ev in eventos_ot or []:
+        op = str(ev.get("Operação") or "")
+        det = str(ev.get("Detalhe") or "")
+        clas = str(ev.get("Classificação") or "")
+        blob = f"{op} {det} {clas}".lower()
+        o = ev.get("Origem", "-")
+        d = ev.get("Destino", "-")
+        porta = ev.get("Porta destino", "-")
+        # Função S7/Modbus desconhecida
+        if "função 0x" in blob or "fc " in blob or "desconhecido" in blob or "unknown" in blob:
+            _emit(
+                "Unsupported function request",
+                origem=o,
+                destino=d,
+                porta=porta,
+                detalhe=det or op or "Função OT não mapeada na base offline.",
+            )
+        # Modbus exception / illegal
+        if "exceção" in blob or "exception" in blob or "illegal" in blob:
+            _emit(
+                "Illegal parameters request",
+                origem=o,
+                destino=d,
+                porta=porta,
+                detalhe=det or op,
+            )
+        # Malformed markers from existing parsers
+        if "malformado" in blob or "malformed" in blob:
+            _emit(
+                "Malformed traffic",
+                origem=o,
+                destino=d,
+                porta=porta,
+                detalhe=det or op,
+            )
+            _emit(
+                "Malformed Network/Transport layer",
+                origem=o,
+                destino=d,
+                detalhe=det or op,
+            )
+
+    # Packet rule match: qualquer alerta OT crítico já é um "match" heurístico
+    if any(
+        str(ev.get("Categoria") or "").lower() in (
+            "alteração ot candidata",
+            "transferência ot candidata",
+            "anomalia ot",
+        )
+        for ev in (eventos_ot or [])
+    ):
+        _emit(
+            "Packet rule match",
+            detalhe="Heurística offline de protocolo OT correspondente a operação sensível (write/stop/upload).",
+            sev="Média",
+        )
+
+    return alertas
+
+
 
 def adicionar_alerta(alertas, chave_alertas, alerta):
     chave = (
@@ -7213,7 +7878,10 @@ def analisar_pcap(caminho, limite, iocs_ips, iocs_dominios, progresso=None):
         }
     )
 
-    syn_destinos = defaultdict(set)
+    syn_destinos = defaultdict(set)  # origem -> set("ip:porta")
+    syn_portas_por_origem = defaultdict(set)  # origem -> set(portas)
+    syn_hosts_por_origem = defaultdict(set)  # origem -> set(ips destino)
+    syn_para_ot = defaultdict(set)  # origem -> set("ip:porta") onde porta é OT
 
     amostra = []
     dns_lista = []
@@ -7335,6 +8003,11 @@ def analisar_pcap(caminho, limite, iocs_ips, iocs_dominios, progresso=None):
                     syn_destinos[origem].add(
                         f"{destino}:{porta_destino}"
                     )
+                    syn_hosts_por_origem[origem].add(destino)
+                    if porta_destino is not None:
+                        syn_portas_por_origem[origem].add(int(porta_destino))
+                        if int(porta_destino) in PORTAS_OT or int(porta_destino) in PORTAS_TRANSFERENCIA_OT:
+                            syn_para_ot[origem].add(f"{destino}:{porta_destino}")
 
                 consulta = extrair_consulta_dns(
                     pacote,
@@ -7627,6 +8300,22 @@ def analisar_pcap(caminho, limite, iocs_ips, iocs_dominios, progresso=None):
                     "Detalhe": ev.get("Detalhe") or op or clas,
                 },
             )
+
+
+    # Catálogo de alertas estilo plataformas OT de mercado (somente evidência PCAP)
+    gerar_alertas_catalogo_mercado(
+        alertas,
+        alertas_chaves,
+        syn_destinos=syn_destinos,
+        syn_portas_por_origem=syn_portas_por_origem,
+        syn_hosts_por_origem=syn_hosts_por_origem,
+        syn_para_ot=syn_para_ot,
+        fluxos=fluxos,
+        eventos_ot=eventos_ot,
+        downloads_suspeitos=downloads_suspeitos,
+        externos=externos,
+        eventos=eventos,
+    )
 
     iocs_candidatos = gerar_iocs_candidatos(
         alertas,

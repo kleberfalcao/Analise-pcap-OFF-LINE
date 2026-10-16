@@ -82,10 +82,29 @@ def analisar_modbus_payload(payload: bytes):
     fc = payload[7]
     fc_n = fc & 0x7F
     excecao = bool(fc & 0x80)
+    # Schneider UMAS (Unity Pro / Control Expert)
+    if fc_n == 0x5A and not excecao:
+        session = payload[8] if len(payload) > 8 else None
+        umas_fn = payload[9] if len(payload) > 9 else None
+        return {
+            "Modbus": True,
+            "UMAS": True,
+            "Função": 0x5A,
+            "UMAS função": umas_fn,
+            "UMAS session": session,
+            "Exceção": False,
+            "Código exceção": None,
+            "Escrita": True,
+            "Identificação dispositivo": False,
+            "Unit": unit,
+            "Tamanho": length,
+            "Protocolo": "Schneider UMAS / Unity Pro",
+        }
     escrita = fc_n in {5, 6, 15, 16, 22, 23}
     ident = fc_n == 43
     return {
         "Modbus": True,
+        "UMAS": False,
         "Função": fc_n,
         "Exceção": excecao,
         "Código exceção": payload[8] if excecao and len(payload) > 8 else None,
